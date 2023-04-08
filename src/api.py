@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Any
@@ -8,15 +9,30 @@ from webob import Request, Response
 
 class BaseResponse:
     def __init__(self, **kwargs):
-        self.body: Any = kwargs['body']
-        self.headers: dict = kwargs['headers']
+        self.body: Any = ''
+        self.text: str = kwargs['text']
+        self.headers: dict = kwargs['headers'] if 'headers' in kwargs else {}
+        self.status: int = kwargs['status'] if 'status' in kwargs else 200
 
+
+class PlainResponse(BaseResponse):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.headers['headers'] = 'Content-Type: text/plain'
+        self.body = kwargs['body'] if 'body' in kwargs else ''
 
 class JsonResponse(BaseResponse):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.headers['headers'] = 'Content-Type: text/html'
+        self.headers['headers'] = 'Content-Type: text/json'
+        self.body = kwargs['body'] if 'body' in kwargs else ''
 
+
+class AppRequest:
+    def __init__(self, request: Request):
+        self.body = request.body.decode()
+        self.headers = request.headers
+        self.text = request.text
 
 class Methods(Enum):
     GET = 'GET'
@@ -25,6 +41,7 @@ class Methods(Enum):
     PATCH = 'PATCH'
     DELETE = 'DELETE'
 
+
 @dataclass(repr=True)
 class PathStruct:
     method: str
@@ -32,9 +49,8 @@ class PathStruct:
     handler: Callable
 
 
-def default_response(response: Response) -> None:
-    response.status_code = 404
-    response.text = 'Page doesnt exist'
+def default_response() -> BaseResponse:
+    return PlainResponse(status=404, text='Page doesnt exist')
 
 
 class API:
@@ -49,13 +65,21 @@ class API:
 
 
     def __handle_request(self, request: Request) -> Response:
-        response = Response()
         handler, kwargs = self.__searching_path(request)
-        print(handler, kwargs)
+        app_request = AppRequest(request)
         if handler is not None:
-            request_response = handler(request, response)
+            response_obj: BaseResponse = handler(app_request)
+            # handle raw response from funcs
+            if not isinstance(response_obj, BaseResponse):
+                response_obj = PlainResponse(text=response_obj)
         else:
-            request_response = default_response(response)
+            response_obj: BaseResponse = default_response()
+
+        response = Response()
+        response.status = response_obj.status
+        response.text = response_obj.text
+        response.headers = response_obj.headers
+        response.body = json.dumps(response_obj.body).encode()
         return response
 
 
@@ -65,7 +89,6 @@ class API:
             if route.path == request.path and route.method == request.method:
                 print('парсим', route.path, request.path)
                 parse_result = parse(route.path, request.path)
-                print(parse_result)
 
                 if parse_result is not None:
                     return route.handler, parse_result.named

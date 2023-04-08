@@ -1,44 +1,43 @@
-from api import API
+from webob import Response
+
+from api import API, JsonResponse
 
 app = API()
 
 
 @app.get("/home")
-def get(request, response):
+def get(request):
     #response.text = f'hello get {request}'
-    return f'hello get {request}'
+    return JsonResponse(text=f'hello get {request}')
 
 @app.post("/home")
-def post(request, response):
+def post(request):
     #response.text = f'hello post {request}'
-    return f'hello post {request}'
+    body_data = request.body
+    print(body_data)
+    return JsonResponse(text=f'hello post {request}', body={'test': 'test', 'test1': 1})
 
 
 @app.get("/")
-def get1(request, response):
-    response.text = f'hello get1'
+def get1(request):
     return f'hello get1'
 
 
 @app.post("/")
-def post1(request, response):
-    response.text = f'hello post1'
+def post1(request):
     return f'hello post1'
 
 
 @app.put("/")
-def put1(request, response):
-    response.text = f'hello put1'
+def put1(request):
     return f'hello put1'
 
 
 @app.patch("/")
-def patch1(request, response):
-    response.text = f'hello patch1 '
+def patch1(request):
     return f'hello patch1'
 
 
 @app.delete("/")
-def delete1(request, response):
-    response.text = f'hello delete1'
+def delete1(request):
     return f'hello delete1'
