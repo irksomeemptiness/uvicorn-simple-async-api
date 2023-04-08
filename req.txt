@@ -1,0 +1,8 @@
+pip==22.2.1
+setuptools==62.6.0
+wheel==0.37.1
+# must
+gunicorn
+waitress
+webob
+parse
