@@ -61,7 +61,6 @@ def delete1(request: InputRequest):
     return f'hello delete1'
 
 
-
 if __name__ == "__main__":
     config = uvicorn.Config("main:app", port=5000, log_level="info")
     server = uvicorn.Server(config)
