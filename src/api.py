@@ -1,40 +1,17 @@
+import inspect
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Any
+from typing import Callable, Any, Coroutine, AsyncIterable
 
 from parse import parse
-from webob import Request, Response
+from uvicorn.protocols.http.h11_impl import RequestResponseCycle
+
+from src.response import BaseResponse, PlainResponse, ErrorResponse, JsonResponse, DEFAULT_CODE
+from src.input_request import InputRequest
 
 
-class BaseResponse:
-    def __init__(self, **kwargs):
-        self.body: Any = ''
-        self.text: str = kwargs['text']
-        self.headers: dict = kwargs['headers'] if 'headers' in kwargs else {}
-        self.status: int = kwargs['status'] if 'status' in kwargs else 200
-
-
-class PlainResponse(BaseResponse):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.headers['headers'] = 'Content-Type: text/plain'
-        self.body = kwargs['body'] if 'body' in kwargs else ''
-
-class JsonResponse(BaseResponse):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.headers['headers'] = 'Content-Type: text/json'
-        self.body = kwargs['body'] if 'body' in kwargs else ''
-
-
-class AppRequest:
-    def __init__(self, request: Request):
-        self.body = request.body.decode()
-        self.headers = request.headers
-        self.text = request.text
-
-class Methods(Enum):
+class HttpMethods(Enum):
     GET = 'GET'
     POST = 'POST'
     PUT = 'PUT'
@@ -46,85 +23,113 @@ class Methods(Enum):
 class PathStruct:
     method: str
     path: str
-    handler: Callable
+    handler: Coroutine
 
 
 def default_response() -> BaseResponse:
-    return PlainResponse(status=404, text='Page doesnt exist')
+    return ErrorResponse()
 
 
 class API:
-    def __init__(self):
+    def __init__(self) -> None:
         self.routes: list[PathStruct] = []
 
 
-    def __call__(self, environ, start_response) -> Response:
-        request = Request(environ)
-        response = self.__handle_request(request)
-        return response(environ, start_response)
+    async def __call__(
+            self, scope: dict, receive: RequestResponseCycle, send: Any) -> None:
+        if scope['type'] in ('http', 'https'):
+            request = InputRequest(**scope)
+            response_obj = await self.__handle_request(request, receive)
+            await self.response(response_obj, send)
 
 
-    def __handle_request(self, request: Request) -> Response:
-        handler, kwargs = self.__searching_path(request)
-        app_request = AppRequest(request)
+    async def __handle_request(self, request: InputRequest, receive: RequestResponseCycle) -> BaseResponse:
+        request._body = await read_body(receive)
+        handler, kwargs = await self.__searching_path(request)
         if handler is not None:
-            response_obj: BaseResponse = handler(app_request)
-            # handle raw response from funcs
-            if not isinstance(response_obj, BaseResponse):
-                response_obj = PlainResponse(text=response_obj)
+            if inspect.iscoroutinefunction(handler):
+                response_obj: BaseResponse = await handler(request, **kwargs)
+            else:
+                response_obj: BaseResponse = handler(request, **kwargs)
+
+            if not isinstance(response_obj, JsonResponse):
+                response_obj = PlainResponse(body=response_obj)
         else:
             response_obj: BaseResponse = default_response()
-
-        response = Response()
-        response.status = response_obj.status
-        response.text = response_obj.text
-        response.headers = response_obj.headers
-        response.body = json.dumps(response_obj.body).encode()
-        return response
+        return response_obj
 
 
-    def __searching_path(self, request: Request) -> (Callable, dict):
+    async def __path_genarator(self) -> AsyncIterable:
         for route in self.routes:
-            print(route, request.method, request.path)
-            if route.path == request.path and route.method == request.method:
-                print('парсим', route.path, request.path)
-                parse_result = parse(route.path, request.path)
+            yield route
 
+
+    async def __searching_path(self, request: InputRequest) -> (Callable, dict):
+        async for route in self.__path_genarator():
+            parse_result = parse(route.path, request.path)
+            if parse_result and route.method == request.method:
                 if parse_result is not None:
                     return route.handler, parse_result.named
         return None, None
 
 
-    def get(self, path: str):
-        def wrapper(handler):
-            self.routes.append(PathStruct(path=path, method=Methods.GET.value, handler=handler))
+    @staticmethod
+    async def response(response: BaseResponse, send) -> None:
+        await send({
+            'type': 'http.response.start',
+            'status': response.status,
+            'headers': response.headers_to_byte()
+        })
+        await send({
+            'type': 'http.response.body',
+            'body': json.dumps(response.body).encode(DEFAULT_CODE)
+                if isinstance(response.body, dict)
+                else str(response.body).encode(DEFAULT_CODE)
+        })
+
+
+    def get(self, path: str) -> Callable:
+        def wrapper(handler: Coroutine):
+            self.routes.append(PathStruct(path=path, method=HttpMethods.GET.value, handler=handler))
             return handler
         return wrapper
 
 
-    def post(self, path: str):
-        def wrapper(handler):
-            self.routes.append(PathStruct(path=path, method=Methods.POST.value, handler=handler))
+    def post(self, path: str) -> Callable:
+        def wrapper(handler: Coroutine):
+            self.routes.append(PathStruct(path=path, method=HttpMethods.POST.value, handler=handler))
             return handler
         return wrapper
 
 
-    def put(self, path: str):
-        def wrapper(handler):
-            self.routes.append(PathStruct(path=path, method=Methods.PUT.value, handler=handler))
+    def put(self, path: str) -> Callable:
+        def wrapper(handler: Coroutine):
+            self.routes.append(PathStruct(path=path, method=HttpMethods.PUT.value, handler=handler))
             return handler
         return wrapper
 
 
-    def patch(self, path: str):
-        def wrapper(handler):
-            self.routes.append(PathStruct(path=path, method=Methods.PATCH.value, handler=handler))
+    def patch(self, path: str) -> Callable:
+        def wrapper(handler: Coroutine):
+            self.routes.append(PathStruct(path=path, method=HttpMethods.PATCH.value, handler=handler))
             return handler
         return wrapper
 
 
-    def delete(self, path: str):
-        def wrapper(handler):
-            self.routes.append(PathStruct(path=path, method=Methods.DELETE.value, handler=handler))
+    def delete(self, path: str) -> Callable:
+        def wrapper(handler: Coroutine):
+            self.routes.append(PathStruct(path=path, method=HttpMethods.DELETE.value, handler=handler))
             return handler
         return wrapper
+
+
+async def read_body(receive: RequestResponseCycle) -> bytes:
+    body = b''
+    more_body = True
+
+    while more_body:
+        message = await receive()   # which type ?????????
+        body += message.get('body', b'')
+        more_body = message.get('more_body', False)
+
+    return body
